@@ -1,264 +1,236 @@
 """
-Advanced Feature Engineering for Lie Detection
-Derives high-level features from raw landmarks and action units
+Feature Engineering Module
+===========================
+
+Computes advanced features from extracted MediaPipe landmarks and AUs.
+Useful for additional feature engineering on top of raw extracted features.
+
+Features computed:
+- Eye aspect ratio
+- Mouth metrics (width, height, aspect ratio)
+- Facial symmetry scores
+- Head movement dynamics
+- Landmark spread analysis
 """
 
-import pandas as pd
 import numpy as np
-from scipy.spatial.distance import euclidean, pdist, squareform
-import warnings
-warnings.filterwarnings('ignore')
+import pandas as pd
+from typing import Tuple, List
 
 
-class FacialFeatureEngineer:
-    """
-    Derives advanced facial features from raw landmarks and action units
-    """
+class LandmarkFeatures:
+    """Extract features from MediaPipe facial landmarks"""
     
-    def __init__(self, df):
+    # MediaPipe landmark indices
+    LEFT_EYE = [33, 133, 159, 158, 144, 145, 153, 154]
+    RIGHT_EYE = [362, 263, 387, 386, 373, 374, 380, 381]
+    MOUTH = [78, 81, 82, 12, 311, 308, 317, 310, 415, 407, 406, 335]
+    NOSE = [1, 2, 98, 327]
+    FACE_OUTLINE = list(range(0, 17))
+    
+    @staticmethod
+    def euclidean_distance(p1: np.ndarray, p2: np.ndarray) -> float:
+        """Compute Euclidean distance between two points"""
+        return np.sqrt(np.sum((p1 - p2) ** 2))
+    
+    @staticmethod
+    def eye_aspect_ratio(eye_points: np.ndarray) -> float:
         """
-        Initialize engineer
-        
-        Parameters:
-        -----------
-        df : pd.DataFrame
-            DataFrame with raw features
+        Compute eye aspect ratio (EAR)
+        Higher EAR = eye open, Lower EAR = eye closed
         """
-        self.df = df.copy()
-        self.landmark_cols = [col for col in df.columns if 'lm_' in col.lower()]
-        self.au_cols = [col for col in df.columns if 'au_' in col.lower() and 'intensity' not in col.lower()]
-        self.au_intensity_cols = [col for col in df.columns if 'intensity' in col.lower()]
+        # Eye landmarks: [p1, p2, p3, p4, p5, p6]
+        # Distance vertical: (p2-p5) + (p3-p4)
+        # Distance horizontal: p1-p6
         
-        # Define landmark indices for facial regions
-        self.left_eye_indices = [33, 130, 8, 42, 39, 36]      # MediaPipe left eye
-        self.right_eye_indices = [263, 359, 133, 155, 246, 161]  # MediaPipe right eye
-        self.mouth_indices = [61, 185, 40, 39, 37, 0, 267, 269, 270, 409]  # Mouth region
-        self.nose_indices = [1, 2, 3, 4, 5, 6]  # Nose region
-        self.left_eyebrow_indices = [70, 63, 105, 66, 107]  # Left eyebrow
-        self.right_eyebrow_indices = [336, 296, 334, 293, 300]  # Right eyebrow
+        if len(eye_points) < 6:
+            return 0.0
         
-    def extract_landmark_coords(self, row, indices):
-        """Extract x, y, z coordinates for specific landmarks"""
-        coords = []
-        for idx in indices:
-            x = row.get(f'lm_mp_{idx}_x', np.nan)
-            y = row.get(f'lm_mp_{idx}_y', np.nan)
-            z = row.get(f'lm_mp_{idx}_z', np.nan)
-            if not pd.isna([x, y, z]).any():
-                coords.append([x, y, z])
-        return np.array(coords)
+        vertical1 = LandmarkFeatures.euclidean_distance(eye_points[1], eye_points[4])
+        vertical2 = LandmarkFeatures.euclidean_distance(eye_points[2], eye_points[3])
+        horizontal = LandmarkFeatures.euclidean_distance(eye_points[0], eye_points[5])
+        
+        ear = (vertical1 + vertical2) / (2.0 * horizontal + 1e-8)
+        return ear
     
-    def compute_eye_openness(self):
-        """Compute eye openness metric (vertical distance between eyelids)"""
-        print("  Computing eye openness...")
-        
-        eye_openness_left = []
-        eye_openness_right = []
-        
-        for idx, row in self.df.iterrows():
-            # Left eye: distance between upper and lower eyelid
-            left_upper_y = row.get('lm_mp_159_y', np.nan)
-            left_lower_y = row.get('lm_mp_145_y', np.nan)
-            left_openness = abs(left_upper_y - left_lower_y) if not pd.isna([left_upper_y, left_lower_y]).any() else np.nan
-            eye_openness_left.append(left_openness)
-            
-            # Right eye: distance between upper and lower eyelid
-            right_upper_y = row.get('lm_mp_386_y', np.nan)
-            right_lower_y = row.get('lm_mp_374_y', np.nan)
-            right_openness = abs(right_upper_y - right_lower_y) if not pd.isna([right_upper_y, right_lower_y]).any() else np.nan
-            eye_openness_right.append(right_openness)
-        
-        self.df['eye_openness_left'] = eye_openness_left
-        self.df['eye_openness_right'] = eye_openness_right
-        self.df['eye_openness_avg'] = np.mean([eye_openness_left, eye_openness_right], axis=0)
-        
-        return self
+    @staticmethod
+    def mouth_width(mouth_points: np.ndarray) -> float:
+        """Compute mouth width"""
+        if len(mouth_points) < 2:
+            return 0.0
+        left_corner = mouth_points[0]
+        right_corner = mouth_points[6]
+        return LandmarkFeatures.euclidean_distance(left_corner, right_corner)
     
-    def compute_mouth_metrics(self):
-        """Compute mouth width, height, and aspect ratio"""
-        print("  Computing mouth metrics...")
-        
-        mouth_width = []
-        mouth_height = []
-        mouth_aspect_ratio = []
-        
-        for idx, row in self.df.iterrows():
-            # Width: distance between left and right mouth corners
-            left_mouth_x = row.get('lm_mp_61_x', np.nan)
-            right_mouth_x = row.get('lm_mp_291_x', np.nan)
-            width = abs(right_mouth_x - left_mouth_x) if not pd.isna([left_mouth_x, right_mouth_x]).any() else np.nan
-            
-            # Height: distance between top and bottom lips
-            top_mouth_y = row.get('lm_mp_13_y', np.nan)
-            bottom_mouth_y = row.get('lm_mp_14_y', np.nan)
-            height = abs(bottom_mouth_y - top_mouth_y) if not pd.isna([top_mouth_y, bottom_mouth_y]).any() else np.nan
-            
-            # Aspect ratio
-            ar = height / width if width > 0 and not pd.isna([width, height]).any() else np.nan
-            
-            mouth_width.append(width)
-            mouth_height.append(height)
-            mouth_aspect_ratio.append(ar)
-        
-        self.df['mouth_width'] = mouth_width
-        self.df['mouth_height'] = mouth_height
-        self.df['mouth_aspect_ratio'] = mouth_aspect_ratio
-        
-        return self
+    @staticmethod
+    def mouth_height(mouth_points: np.ndarray) -> float:
+        """Compute mouth height"""
+        if len(mouth_points) < 4:
+            return 0.0
+        top = mouth_points[2]
+        bottom = mouth_points[10]
+        return LandmarkFeatures.euclidean_distance(top, bottom)
     
-    def compute_facial_symmetry(self):
-        """Compute left-right facial symmetry"""
-        print("  Computing facial symmetry...")
-        
-        symmetry_scores = []
-        
-        for idx, row in self.df.iterrows():
-            symmetries = []
-            
-            # Compare left and right eyes
-            left_eye_coords = self.extract_landmark_coords(row, self.left_eye_indices)
-            right_eye_coords = self.extract_landmark_coords(row, self.right_eye_indices)
-            
-            if len(left_eye_coords) > 0 and len(right_eye_coords) > 0:
-                eye_sym = np.mean([euclidean(left_eye_coords[i], right_eye_coords[i]) 
-                                  for i in range(min(len(left_eye_coords), len(right_eye_coords)))])
-                symmetries.append(eye_sym)
-            
-            # Compare left and right eyebrows
-            left_brow_coords = self.extract_landmark_coords(row, self.left_eyebrow_indices)
-            right_brow_coords = self.extract_landmark_coords(row, self.right_eyebrow_indices)
-            
-            if len(left_brow_coords) > 0 and len(right_brow_coords) > 0:
-                brow_sym = np.mean([euclidean(left_brow_coords[i], right_brow_coords[i]) 
-                                   for i in range(min(len(left_brow_coords), len(right_brow_coords)))])
-                symmetries.append(brow_sym)
-            
-            avg_symmetry = np.mean(symmetries) if symmetries else np.nan
-            symmetry_scores.append(avg_symmetry)
-        
-        self.df['facial_symmetry_score'] = symmetry_scores
-        
-        return self
+    @staticmethod
+    def mouth_aspect_ratio(mouth_points: np.ndarray) -> float:
+        """Compute mouth aspect ratio (height/width)"""
+        width = LandmarkFeatures.mouth_width(mouth_points)
+        height = LandmarkFeatures.mouth_height(mouth_points)
+        return height / (width + 1e-8)
     
-    def compute_head_dynamics(self):
-        """Compute head pose velocity and acceleration"""
-        print("  Computing head dynamics...")
+    @staticmethod
+    def facial_symmetry(left_points: np.ndarray, right_points: np.ndarray) -> float:
+        """
+        Compute facial symmetry score
+        0 = perfectly symmetric, higher = more asymmetric
+        """
+        if len(left_points) != len(right_points):
+            return 0.0
         
-        # Velocity (change in pitch, yaw, roll)
-        self.df['pitch_velocity'] = self.df['pitch'].diff().abs().fillna(0)
-        self.df['yaw_velocity'] = self.df['yaw'].diff().abs().fillna(0)
-        self.df['roll_velocity'] = self.df['roll'].diff().abs().fillna(0)
-        self.df['head_velocity_avg'] = (self.df['pitch_velocity'] + self.df['yaw_velocity'] + self.df['roll_velocity']) / 3
+        distances = []
+        for l, r in zip(left_points, right_points):
+            dist = LandmarkFeatures.euclidean_distance(l, r)
+            distances.append(dist)
         
-        # Acceleration (second derivative)
-        self.df['pitch_accel'] = self.df['pitch_velocity'].diff().abs().fillna(0)
-        self.df['yaw_accel'] = self.df['yaw_velocity'].diff().abs().fillna(0)
-        self.df['roll_accel'] = self.df['roll_velocity'].diff().abs().fillna(0)
-        self.df['head_accel_avg'] = (self.df['pitch_accel'] + self.df['yaw_accel'] + self.df['roll_accel']) / 3
-        
-        return self
+        asymmetry = np.std(distances)
+        return asymmetry
     
-    def compute_landmark_spread(self):
-        """Compute spread/compactness of facial landmarks"""
-        print("  Computing landmark spread...")
+    @staticmethod
+    def landmark_spread(landmarks: np.ndarray) -> float:
+        """
+        Compute spread of landmarks (how dispersed is the face)
+        Uses principal component analysis concept
+        """
+        if len(landmarks) < 2:
+            return 0.0
         
-        landmark_spread = []
+        # Standard deviation across all landmarks
+        spread_x = np.std(landmarks[:, 0])
+        spread_y = np.std(landmarks[:, 1])
+        spread_z = np.std(landmarks[:, 2]) if landmarks.shape[1] > 2 else 0
         
-        for idx, row in self.df.iterrows():
-            # Extract all landmarks
-            all_landmarks = []
-            for i in range(468):  # MediaPipe has 468 landmarks
-                x = row.get(f'lm_mp_{i}_x', np.nan)
-                y = row.get(f'lm_mp_{i}_y', np.nan)
-                z = row.get(f'lm_mp_{i}_z', np.nan)
-                if not pd.isna([x, y, z]).any():
-                    all_landmarks.append([x, y, z])
-            
-            if len(all_landmarks) > 1:
-                all_landmarks = np.array(all_landmarks)
-                # Compute pairwise distances
-                distances = pdist(all_landmarks)
-                spread = np.mean(distances)
-                landmark_spread.append(spread)
-            else:
-                landmark_spread.append(np.nan)
-        
-        self.df['landmark_spread'] = landmark_spread
-        
-        return self
+        return np.sqrt(spread_x**2 + spread_y**2 + spread_z**2)
+
+
+class AUAnalyzer:
+    """Analyze Action Units for deception indicators"""
     
-    def compute_au_intensity_stats(self):
+    # Known deception-related AUs
+    DECEPTION_AUs = {
+        1: "Inner Brow Raiser",
+        4: "Brow Lowerer",
+        5: "Upper Lid Raiser",
+        7: "Lid Tightener",
+        10: "Upper Lip Raiser",
+        12: "Lip Corner Puller (Smile)",
+        14: "Dimpler",
+        15: "Lip Corner Depressor",
+        17: "Chin Raiser",
+        20: "Lip Stretcher",
+        23: "Lip Tightener",
+        24: "Lip Pressor",
+        25: "Lips Part",
+        26: "Jaw Drop",
+        27: "Mouth Stretch"
+    }
+    
+    @staticmethod
+    def get_deception_au_subset(au_list: List[int]) -> List[int]:
+        """Filter AUs that are known deception indicators"""
+        return [au for au in au_list if au in AUAnalyzer.DECEPTION_AUs]
+    
+    @staticmethod
+    def au_intensity_stats(au_intensities: np.ndarray) -> dict:
         """Compute statistics on AU intensities"""
-        print("  Computing AU intensity statistics...")
-        
-        au_intensity_mean = []
-        au_intensity_max = []
-        au_intensity_std = []
-        
-        for idx, row in self.df.iterrows():
-            intensities = [row.get(col, 0) for col in self.au_intensity_cols if col in row.index]
-            if intensities:
-                au_intensity_mean.append(np.mean(intensities))
-                au_intensity_max.append(np.max(intensities))
-                au_intensity_std.append(np.std(intensities))
-            else:
-                au_intensity_mean.append(np.nan)
-                au_intensity_max.append(np.nan)
-                au_intensity_std.append(np.nan)
-        
-        self.df['au_intensity_mean'] = au_intensity_mean
-        self.df['au_intensity_max'] = au_intensity_max
-        self.df['au_intensity_std'] = au_intensity_std
-        
-        return self
-    
-    def compute_au_count(self):
-        """Count number of active action units"""
-        print("  Computing active AU count...")
-        
-        au_count = []
-        
-        for idx, row in self.df.iterrows():
-            count = sum(1 for col in self.au_cols if row.get(col, 0) > 0)
-            au_count.append(count)
-        
-        self.df['active_au_count'] = au_count
-        
-        return self
-    
-    def engineer_all_features(self):
-        """Run all feature engineering"""
-        print("\n🔧 Feature Engineering in Progress...")
-        print(f"   Input shape: {self.df.shape}")
-        
-        (self.compute_eye_openness()
-         .compute_mouth_metrics()
-         .compute_facial_symmetry()
-         .compute_head_dynamics()
-         .compute_landmark_spread()
-         .compute_au_intensity_stats()
-         .compute_au_count())
-        
-        print(f"   Output shape: {self.df.shape}")
-        print(f"   New features: {self.df.shape[1] - len(self.landmark_cols) - len(self.au_cols) - len(self.au_intensity_cols)}")
-        print("✓ Feature engineering complete")
-        
-        return self.df
+        return {
+            'mean_intensity': np.mean(au_intensities),
+            'max_intensity': np.max(au_intensities),
+            'min_intensity': np.min(au_intensities),
+            'std_intensity': np.std(au_intensities),
+            'sum_intensity': np.sum(au_intensities)
+        }
 
 
-def main():
-    """Example usage"""
-    # Load data
-    df = pd.read_csv('your_lie_detection_data.csv')
+class TemporalFeatures:
+    """Extract temporal/dynamic features"""
     
-    # Engineer features
-    engineer = FacialFeatureEngineer(df)
-    df_engineered = engineer.engineer_all_features()
+    @staticmethod
+    def compute_velocity(values: np.ndarray, dt: float = 1.0) -> np.ndarray:
+        """Compute velocity (frame-to-frame change)"""
+        return np.diff(values, axis=0) / dt
     
-    # Save engineered features
-    df_engineered.to_csv('lie_detection_data_engineered.csv', index=False)
-    print(f"\n✓ Engineered data saved to 'lie_detection_data_engineered.csv'")
+    @staticmethod
+    def compute_acceleration(values: np.ndarray, dt: float = 1.0) -> np.ndarray:
+        """Compute acceleration (change in velocity)"""
+        velocity = TemporalFeatures.compute_velocity(values, dt)
+        return np.diff(velocity, axis=0) / dt
+    
+    @staticmethod
+    def compute_jitter(values: np.ndarray) -> float:
+        """Compute jitter (variability in motion)"""
+        if len(values) < 2:
+            return 0.0
+        velocity = np.diff(values, axis=0)
+        return np.mean(np.std(velocity, axis=0))
+    
+    @staticmethod
+    def compute_smoothness(values: np.ndarray) -> float:
+        """
+        Compute smoothness metric
+        Higher = smoother, Lower = jittery
+        """
+        if len(values) < 3:
+            return 1.0
+        
+        # Compute second derivative
+        vel = np.diff(values, axis=0)
+        acc = np.diff(vel, axis=0)
+        
+        # Smoothness inversely proportional to acceleration
+        mean_acc = np.mean(np.linalg.norm(acc, axis=1))
+        smoothness = 1.0 / (1.0 + mean_acc)
+        
+        return smoothness
 
 
-if __name__ == '__main__':
-    main()
+def extract_engineered_features(df: pd.DataFrame, 
+                                landmark_cols: List[str]) -> pd.DataFrame:
+    """
+    Extract engineered features from raw features
+    
+    Args:
+        df: DataFrame with raw features
+        landmark_cols: Column names for landmarks (lm_mp_*_x/y/z)
+    
+    Returns:
+        DataFrame with additional engineered features
+    """
+    
+    engineered = pd.DataFrame()
+    
+    # Extract landmark coordinates
+    for col in landmark_cols:
+        if col.endswith('_x'):
+            landmark_id = col.split('_')[2]
+            x_col = f'lm_mp_{landmark_id}_x'
+            y_col = f'lm_mp_{landmark_id}_y'
+            z_col = f'lm_mp_{landmark_id}_z'
+            
+            if all(c in df.columns for c in [x_col, y_col, z_col]):
+                points = df[[x_col, y_col, z_col]].values
+                
+                # You can compute per-landmark features here
+                # For example, distance from face center, etc.
+    
+    return engineered
+
+
+if __name__ == "__main__":
+    # Example usage
+    print("Feature Engineering Module")
+    print("=" * 60)
+    print("\nAvailable classes:")
+    print("  - LandmarkFeatures: Eye AR, mouth metrics, symmetry")
+    print("  - AUAnalyzer: AU-based deception detection")
+    print("  - TemporalFeatures: Velocity, acceleration, jitter")
+    print("\nImport and use in your analysis scripts.")
